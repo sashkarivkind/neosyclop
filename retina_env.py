@@ -113,6 +113,9 @@ class RetinaEnv(object):
         if self.warmup_done:
             this_spectral_density = spectral_power_half(self.retinal_view)[:,
                                      self.config.min_freq:self.config.max_freq]
+            #normalize
+            this_spectral_density /= tf.reduce_sum(this_spectral_density,axis=1,keepdims=True)
+            #update cumulative_spectral_density
             a = self.timestep - self.config.t_ignore
             self.cumulative_spectral_density = (self.cumulative_spectral_density * (a - 1) + this_spectral_density) / a
 
