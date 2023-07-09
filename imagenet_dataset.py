@@ -87,23 +87,46 @@ def _parse_fn(example_serialized, is_training,image_h=224,image_w=224,**kwargs):
     label = tf.one_hot(parsed['label'] , 1000, dtype=tf.float32) ##todo!!!!!!
     return (image, label)
 
-def get_dataset(tfrecords_dir, subset, batch_size, **kwargs):
+def get_dataset(tfrecords_dir, subset, batch_size, deterministic=False, NUM_DATA_WORKERS=None,  **kwargs):
     """Read TFRecords files and turn them into a TFRecordDataset."""
+    if NUM_DATA_WORKERS is not None:
+        config.NUM_DATA_WORKERS = NUM_DATA_WORKERS
     files = tf.io.matching_files(os.path.join(tfrecords_dir, '*-%s*' % subset))
     shards = tf.data.Dataset.from_tensor_slices(files)
-    shards = shards.shuffle(tf.cast(tf.shape(files)[0], tf.int64))
+
+    if not deterministic:
+        shards = shards.shuffle(tf.cast(tf.shape(files)[0], tf.int64))
     shards = shards.repeat()
     dataset = shards.interleave(tf.data.TFRecordDataset, cycle_length=4)
-    dataset = dataset.shuffle(buffer_size=8192)
+
+    if not deterministic:
+        dataset = dataset.shuffle(buffer_size=8192)
+
+    if subset == 'train':
+        parser = partial(_parse_fn, is_training=True ,**kwargs)
+    elif subset == 'validation':
+        parser = partial(_parse_fn, is_training=False,**kwargs)
+    else:
+        raise NotImplementedError
+
+    # dataset = dataset.apply(
+    #     tf.data.experimental.map_and_batch(
+    #         map_func=parser,
+    #         batch_size=batch_size,
+    #         num_parallel_calls=config.NUM_DATA_WORKERS))
 
 
-    parser = partial(_parse_fn, is_training=True ,**kwargs)
-
-    dataset = dataset.apply(
-        tf.data.experimental.map_and_batch(
-            map_func=parser,
-            batch_size=batch_size,
-            num_parallel_calls=config.NUM_DATA_WORKERS))
+    if deterministic:
+        dataset = dataset.map(parser, num_parallel_calls=config.NUM_DATA_WORKERS)
+        dataset = dataset.batch(batch_size)
+    else:
+        dataset = dataset.apply(
+            tf.data.experimental.map_and_batch(
+                map_func=parser,
+                batch_size=batch_size,
+                num_parallel_calls=config.NUM_DATA_WORKERS
+            )
+        )
 
     dataset = dataset.prefetch(batch_size)
 

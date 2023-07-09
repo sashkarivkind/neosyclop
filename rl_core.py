@@ -36,7 +36,9 @@ class Buffer:
                  batch_size=64,
                  num_states=1,
                  num_actions=1,
-                 state_reshape_fn=None):
+                 state_reshape_fn=None,
+                 use_dones=False):
+
         # Number of "experiences" to store at max
         self.buffer_capacity = buffer_capacity
         # Num of tuples to train on.
@@ -45,28 +47,21 @@ class Buffer:
         # Its tells us num of times record() was called.
         self.buffer_counter = 0
 
+        self.use_dones = use_dones
         # Instead of list of tuples as the exp.replay concept go
         # We use different np.arrays for each tuple element
         self.state_buffer = np.zeros((self.buffer_capacity, num_states))
         self.action_buffer = np.zeros((self.buffer_capacity, num_actions))
         self.reward_buffer = np.zeros((self.buffer_capacity))
         self.next_state_buffer = np.zeros((self.buffer_capacity, num_states))
+        if self.use_dones:
+            self.done_buffer = np.zeros(self.buffer_capacity)
 
         self.state_reshape_fn = state_reshape_fn if state_reshape_fn is not None else lambda x: x
 
+        self.actor_loss_buffer = []
+        self.critic_loss_buffer = []
 
-    # Takes (s,a,r,s') observation tuple as input
-    # def record(self, obs_tuple):
-    #     # Set index to zero if buffer_capacity is exceeded,
-    #     # replacing old records
-    #     index = self.buffer_counter % self.buffer_capacity
-    #
-    #     self.state_buffer[index] = obs_tuple[0]
-    #     self.action_buffer[index] = obs_tuple[1]
-    #     self.reward_buffer[index] = obs_tuple[2]
-    #     self.next_state_buffer[index] = obs_tuple[3]
-    #
-    #     self.buffer_counter += 1
 
     def record(self, obs_batch):
         # Set indices starting from buffer_counter
@@ -75,8 +70,10 @@ class Buffer:
         self.action_buffer[indices] = obs_batch[1]   #[:, 1]
         self.reward_buffer[indices] = obs_batch[2]   #[:, 2]
         self.next_state_buffer[indices] = obs_batch[3]   #[:, 3]
+        if self.use_dones:
+            self.done_buffer[indices] = obs_batch[4]   #[:, 4]
 
-        self.buffer_counter += len(obs_batch)
+        self.buffer_counter += self.batch_size
 
     # We compute the loss and update parameters
     def learn(self, actor_model, target_actor, critic_model, target_critic, actor_optimizer, critic_optimizer, gamma, tau):
@@ -90,11 +87,28 @@ class Buffer:
         action_batch = tf.convert_to_tensor(self.action_buffer[batch_indices])
         reward_batch = tf.convert_to_tensor(self.reward_buffer[batch_indices])
         next_state_batch = tf.convert_to_tensor(self.next_state_buffer[batch_indices])
+        if self.use_dones:
+            done_batch = tf.convert_to_tensor(self.done_buffer[batch_indices])
 
-        self.update(state_batch, action_batch, reward_batch, next_state_batch, actor_model, target_actor, critic_model, target_critic, actor_optimizer, critic_optimizer, gamma, tau)
+        actor_loss, critic_loss = self.update(state_batch,
+                                              action_batch,
+                                              reward_batch,
+                                              next_state_batch,
+                                              actor_model,
+                                              target_actor,
+                                              critic_model,
+                                              target_critic,
+                                              actor_optimizer,
+                                              critic_optimizer,
+                                              gamma,
+                                              tau,
+                                              done_batch=done_batch if self.use_dones else None)
+        self.actor_loss_buffer.append(actor_loss.numpy())
+        self.critic_loss_buffer.append(critic_loss.numpy())
 
     @tf.function
-    def update(self, state_batch, action_batch, reward_batch, next_state_batch, actor_model, target_actor, critic_model, target_critic, actor_optimizer, critic_optimizer, gamma, tau):
+    def update(self, state_batch, action_batch, reward_batch, next_state_batch, actor_model,
+               target_actor, critic_model, target_critic, actor_optimizer, critic_optimizer, gamma, tau, done_batch=None):
         # Training and updating Actor & Critic networks.
 
         #shaping the state according to the state shaping function
@@ -108,15 +122,22 @@ class Buffer:
             #     y = reward_batch
             # else:
             #     y = reward_batch + gamma * target_critic([next_state_batch, target_actions], training=True)
+            if self.use_dones:
+                y = tf.cast(reward_batch,tf.float32) + \
+                    (1 - tf.cast(done_batch,tf.float32)) * gamma * target_critic([next_state_batch, target_actions], training=True)
+            else:
+                y = tf.cast(reward_batch,tf.float32) + gamma * target_critic([next_state_batch, target_actions], training=True)
 
-            y = tf.cast(reward_batch,tf.float32) + gamma * target_critic([next_state_batch, target_actions], training=True)
-            # y = gamma * target_critic([next_state_batch, target_actions], training=True)
             critic_value = critic_model([state_batch, action_batch], training=True)
             critic_loss = tf.math.reduce_mean(tf.math.square(y - critic_value))
 
         critic_grad = tape.gradient(critic_loss, critic_model.trainable_variables)
         critic_optimizer.apply_gradients(
             zip(critic_grad, critic_model.trainable_variables))
+
+        # self.debug_critic_value = critic_value
+        # self.debug_critic_grad = critic_grad
+        # self.debug_critic_loss = critic_loss
 
         with tf.GradientTape() as tape:
             actions = actor_model(state_batch, training=True)
@@ -127,6 +148,9 @@ class Buffer:
         actor_grad = tape.gradient(actor_loss, actor_model.trainable_variables)
         actor_optimizer.apply_gradients(
             zip(actor_grad, actor_model.trainable_variables))
+        #keep track of the loss in the buffer
+        return actor_loss, critic_loss
+
 
 
 def create_target_network(model):
@@ -138,3 +162,5 @@ def create_target_network(model):
 def update_target(target_weights, weights, tau):
     for (a, b) in zip(target_weights, weights):
             a.assign(b * tau + a * (1 - tau))
+
+

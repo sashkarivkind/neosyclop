@@ -174,7 +174,16 @@ class RetinaEnv(object):
         timestep = tf.reshape(observation[:,-1],[self.config.batch_size,1])
         return retinal_view,cumulative_spectral_density,location_history,timestep
 
-
+    #auxillary version of unflatten_observation that does not depend on batch_size
+    def unflatten_observation_v2(self,observation):
+        retinal_view = tf.reshape(observation[:,:self.retinal_view_size],
+                                  [-1,self.config.image_h,self.config.image_w])
+        cumulative_spectral_density = tf.reshape(observation[:,self.retinal_view_size:self.retinal_view_size+self.spectral_density_size],
+                                                 [-1,self.config.max_freq-self.config.min_freq])
+        location_history = tf.reshape(observation[:,self.retinal_view_size+self.spectral_density_size:self.retinal_view_size+self.spectral_density_size+self.coordinates_size*self.config.history_length],
+                                      [-1,self.coordinates_size,self.config.history_length])
+        timestep = tf.reshape(observation[:,-1],[-1,1])
+        return retinal_view,cumulative_spectral_density,location_history,timestep
 
 
 #function to crop images
