@@ -46,3 +46,5 @@ htmlcov/
 .coverage_report/*
 .hypothesis/
 .pytest_cache/
+.ipynb_checkpoints
+.ipynb_checkpoints/

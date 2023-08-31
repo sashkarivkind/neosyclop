@@ -1,13 +1,21 @@
 import tensorflow as tf
 import numpy as np
+from misc import update_with_defaults
+import types
+
 
 class RetinaEnv(object):
     def __init__(self,config,image_generator=None):
+        #Set config. Parameters that are not set in config are set to default values
+        config = update_with_defaults(default_params=self.load_defaults(),user_params=config)
+
         self.config = config
+        if config.loud:
+            print("config: ",config)
         self.foveate = config.foveate
         self.image_h = config.image_h
         self.image_w = config.image_w
-
+        self.sum_axes = config.sum_axes
         self.image_generator = image_generator
         self.filter = config.filter.reshape((1,1,config.history_length,1))
         self.batch_of_ones = tf.ones((config.batch_size,1))
@@ -16,7 +24,7 @@ class RetinaEnv(object):
         self.coordinates_size = 2
 
         self.retinal_view_size = config.image_h*config.image_w
-        self.spectral_density_size = config.max_freq-config.min_freq
+        self.spectral_density_size = (config.max_freq-config.min_freq)*(1 if self.sum_axes else 2)
         self.location_history_size = self.coordinates_size * self.config.history_length
 
         self.timestep_size = 1
@@ -65,7 +73,8 @@ class RetinaEnv(object):
         self.location_history = tf.zeros((self.config.batch_size,2,self.config.history_length))
         self.timestep = 0
         self.warmup_done = False
-        self.cumulative_spectral_density = np.zeros((self.config.batch_size,self.config.max_freq-self.config.min_freq))
+        self.cumulative_spectral_density = np.zeros((self.config.batch_size,
+                                                     self.spectral_density_size))
 
         #location is the center of the retinal view
         self.location = tf.zeros((self.config.batch_size,2))
@@ -111,10 +120,19 @@ class RetinaEnv(object):
         # compute spectral density
         self.warmup_done = self.timestep > self.config.t_ignore
         if self.warmup_done:
-            this_spectral_density = spectral_power_half(self.retinal_view)[:,
-                                     self.config.min_freq:self.config.max_freq]
+            raw_power = spectral_power_half(self.retinal_view, sum_axes=self.sum_axes)
+            if self.sum_axes:
+                this_spectral_density = raw_power[:,
+                                         self.config.min_freq:self.config.max_freq]
+            else:
+                this_spectral_density = np.concatenate([x[:,self.config.min_freq:self.config.max_freq] for x in raw_power],
+                                                         axis=1)
+                # print('this_spectral_density',this_spectral_density.shape)
             #normalize
-            this_spectral_density /= tf.reduce_sum(this_spectral_density,axis=1,keepdims=True)
+            if self.config.normalize_spectral_density_per_step:
+                this_spectral_density /= tf.reduce_sum(this_spectral_density,axis=1,keepdims=True)
+            else: #use predefined normalization
+                this_spectral_density /= self.config.fixed_spectral_density_normalization
             #update cumulative_spectral_density
             a = self.timestep - self.config.t_ignore
             self.cumulative_spectral_density = (self.cumulative_spectral_density * (a - 1) + this_spectral_density) / a
@@ -137,13 +155,17 @@ class RetinaEnv(object):
     def calculate_reward(self):
         #computing mean and variance of cumulative_spectral_density
         if self.warmup_done:
-            mean = tf.reduce_mean(self.cumulative_spectral_density,axis=1,keepdims=True) #keepdims=True is needed to enable broadcasting
-            variance = tf.reduce_mean(tf.square(self.cumulative_spectral_density-mean),axis=1)
+            mean = np.mean(self.cumulative_spectral_density,axis=1,keepdims=True) #keepdims=True is needed to enable broadcasting
+            variance = np.mean(tf.square(self.cumulative_spectral_density-mean),axis=1)
             #computing reward as coefficient of variation
-            reward = - tf.sqrt(variance) / tf.squeeze(mean) #here squeeze is needed to remove the extra dimension introduced by keepdims
+            reward = - np.sqrt(variance) / np.squeeze(mean) #here squeeze is needed to remove the extra dimension introduced by keepdims
         else:
-            reward = tf.zeros((self.config.batch_size))
-        return tf.cast(reward,tf.float32)
+            reward = np.zeros((self.config.batch_size))
+        #penalize location
+        if self.config.distance_penalty_enabled:
+            distance = np.sqrt(np.sum(np.square(self.location),axis=1))
+            reward -= self.config.distance_penalty_coefficient * np.power(distance/self.config.distance_penalty_r0,self.config.distance_penalty_exponent)
+        return reward #tf.cast(reward,tf.float32)
 
     def check_done(self):
         done = self.timestep >= self.config.t_max
@@ -168,7 +190,7 @@ class RetinaEnv(object):
 
     def unflatten_observation(self,observation):
         retinal_view = tf.reshape(observation[:,:self.retinal_view_size],[self.config.batch_size,self.config.image_h,self.config.image_w])
-        cumulative_spectral_density = tf.reshape(observation[:,self.retinal_view_size:self.retinal_view_size+self.spectral_density_size],[self.config.batch_size,self.config.max_freq-self.config.min_freq])
+        cumulative_spectral_density = tf.reshape(observation[:,self.retinal_view_size:self.retinal_view_size+self.spectral_density_size],[self.config.batch_size,self.spectral_density_size])
         location_history = tf.reshape(observation[:,self.retinal_view_size+self.spectral_density_size:self.retinal_view_size+self.spectral_density_size+self.coordinates_size*self.config.history_length],
                                       [self.config.batch_size,self.coordinates_size,self.config.history_length])
         timestep = tf.reshape(observation[:,-1],[self.config.batch_size,1])
@@ -179,11 +201,26 @@ class RetinaEnv(object):
         retinal_view = tf.reshape(observation[:,:self.retinal_view_size],
                                   [-1,self.config.image_h,self.config.image_w])
         cumulative_spectral_density = tf.reshape(observation[:,self.retinal_view_size:self.retinal_view_size+self.spectral_density_size],
-                                                 [-1,self.config.max_freq-self.config.min_freq])
+                                                 [-1,self.spectral_density_size])
         location_history = tf.reshape(observation[:,self.retinal_view_size+self.spectral_density_size:self.retinal_view_size+self.spectral_density_size+self.coordinates_size*self.config.history_length],
                                       [-1,self.coordinates_size,self.config.history_length])
         timestep = tf.reshape(observation[:,-1],[-1,1])
         return retinal_view,cumulative_spectral_density,location_history,timestep
+
+    def load_defaults(self):
+        defaults = types.SimpleNamespace()
+        defaults.normalize_spectral_density_per_step = True
+        defaults.fixed_spectral_density_normalization = 1.0e6 # only used if normalize_spectral_density_per_step is False
+        defaults.loud = True
+        defaults.sum_axes = True
+
+        defaults.distance_penalty_enabled = False
+        defaults.distance_penalty_coefficient = 0.1
+        defaults.distance_penalty_exponent = 2
+        defaults.distance_penalty_r0 = 15.0
+
+        return defaults
+
 
 
 #function to crop images
@@ -228,7 +265,7 @@ def test():
 #and then summing both directions
 #fft is computed using numpy
 #returns a batch of 1D power spectra
-def spectral_power(images, convert_to_grayscale=False):
+def spectral_power(images, convert_to_grayscale=False,sum_axes=True):
     #convert images to grayscale
     if convert_to_grayscale:
         images = rgb2gray(images)
@@ -244,15 +281,21 @@ def spectral_power(images, convert_to_grayscale=False):
     power_v = np.sum(power,axis=2)
     #sum power spectra along both directions
     power_sum = power_h + power_v
-    return power_sum
+    if sum_axes:
+        return power_sum
+    else:
+        return power_h,power_v
 
 #function that returns first half of power spectra
 #images is a batch of images
 #convert_to_grayscale is a boolean that indicates whether to convert images to grayscale
 #returns a batch of 1D power spectra
-def spectral_power_half(images, convert_to_grayscale=False):
-    power = spectral_power(images, convert_to_grayscale)
-    power_half = power[:,:power.shape[1]//2]
+def spectral_power_half(images, convert_to_grayscale=False,sum_axes=True):
+    power = spectral_power(images, convert_to_grayscale=convert_to_grayscale,sum_axes=sum_axes)
+    if sum_axes:
+        power_half = power[:,:power.shape[1]//2]
+    else:
+        power_half = power[0][:,:power[0].shape[1]//2],power[1][:,:power[1].shape[1]//2]
     return power_half
 
 def calculate_retinal_filter(t, T1=5, T2=15, n=3, R=0.8):

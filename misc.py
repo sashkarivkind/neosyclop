@@ -1,6 +1,6 @@
 #python file that contains miscellaneous functions
 import numpy as np
-
+import copy
 #keras model that adds global average pooling
 #to the end of a model and then two fully connected layers followed by softmax
 #input_shape is the shape of the input image
@@ -61,3 +61,31 @@ def print_progress_bar(iteration, total, prefix='', suffix='', decimals=1, lengt
     print('\r%s |%s| %s%% %s' % (prefix, bar, percent, suffix), end='\r')
     if iteration == total:
         print()
+
+#function that receives an object whose attributes are default parameters
+#and an object whose attributes are defined parameters and returns a dictionary
+#of parameters with the default parameters updated with the user defined parameters
+#default_params is an object whose attributes are default parameters
+#user_params is an object whose attributes are user defined parameters
+def update_with_defaults(default_params=None, user_params=None):
+    params = copy.copy(default_params)
+    for key, value in user_params.__dict__.items():
+        #if the key is not in the default parameters
+        if key not in params.__dict__:
+            #raise warning
+            print('Warning: parameter {} is not in the default parameters'.format(key))
+        params.__dict__[key] = value
+    return params
+
+
+
+
+
+
+    # params = default_params.copy()
+    # for key, value in user_params.items():
+    #     #if the key is not in the default parameters
+    #     if key not in params: #raise warning
+    #         print('Warning: parameter {} is not in the default parameters'.format(key))
+    #     params[key] = value
+    # return params
